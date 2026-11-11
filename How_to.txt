@@ -1,0 +1,431 @@
+HOW TO: DEVELOPMENT SETUP, SIMULATION, AND PERIPHERAL EXTENSION
+===========================================================
+
+Scope
+-----
+Repository: I-M-AJ/Advanced-RISC-V-32-bit-SoC
+Windows checkout: F:\Anamoly_detection\Advanced-RISC-V-32-bit-SoC
+
+This guide describes the checked-in RTL and build definitions inspected during
+setup. Proposed examples below are NOT implemented address or IRQ assignments.
+No FPGA board, Vivado license, or bitstream is needed for simulation.
+
+1. INSTALLATION AND TOOL STATUS
+==============================
+
+Recommended environment: Ubuntu-24.04 under WSL2.
+Windows has Git and GitHub CLI. Its GnuWin32 Make is not the recommended runner
+because the repository recipes use POSIX shell commands.
+
+If WSL/Ubuntu is not already installed, run in an Administrator PowerShell:
+
+    wsl --install -d Ubuntu-24.04
+
+Restart if Windows requests it, launch Ubuntu, and complete its user setup.
+On the machine used for this setup, Ubuntu-24.04 already existed under WSL2.
+
+From PowerShell:
+
+    Set-Location F:\Anamoly_detection\Advanced-RISC-V-32-bit-SoC
+    wsl -d Ubuntu-24.04
+
+The remaining commands in this section run INSIDE Ubuntu:
+
+    sudo apt-get update
+    sudo apt-get install -y build-essential verilator python3 gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf xxd gawk
+
+These are reproducible setup commands, not a claim that every package was
+installed during this session. Verilator and its apt dependencies were installed;
+the other required executables were already available.
+
+Check the executable versions:
+
+    make --version
+    verilator --version
+    g++ --version
+    python3 --version
+    riscv64-unknown-elf-gcc --version
+    command -v riscv64-unknown-elf-objcopy riscv64-unknown-elf-objdump grep tee xxd awk
+
+Verified during setup:
+    GNU Make 4.3; G++ 13.3.0; Python 3.12.3; Verilator 5.020.
+    RISC-V GCC, objcopy, objdump, grep, tee, xxd, and awk were found.
+    Icarus Verilog and vvp were also found in WSL, but are not used by the
+    canonical Makefile simulation targets.
+
+Optional tools, NOT found on the inspected Windows/WSL PATHs:
+    Vivado: needed only for FPGA synthesis/implementation.
+    Docker and LibreLane: needed for the separate Sky130 flow, together with
+    its PDK and macro collateral. They are not simulation prerequisites.
+Absence from PATH does not prove a tool is absent elsewhere on disk.
+
+Do not install these optional flows just to run test cases.
+
+2. RUNNING TEST CASES (TCs)
+==========================
+
+All commands below are run from the repository root INSIDE Ubuntu.
+When entered through PowerShell in this checkout, WSL normally inherits the
+directory. Verify with "pwd" and "ls Makefile" before proceeding.
+
+The target name "fpga7" selects the seven-stage FPGA SRAM RTL backend.
+It does NOT mean a physical FPGA is required.
+
+Generate the RISC-V instruction test memory images before core/SoC tests:
+
+    make -C tb/riscv_test
+
+This builds 38 runnable RV32I tests using the cross-compiler and Python converter.
+Output: tb\riscv_test\build\
+The testbenches expect that directory; do not move the images without updating
+their memory-image paths. This command can be repeated after source changes.
+
+Commands used/recommended during setup:
+
+    make test TARGET=fpga7 TEST=soc_addr_decode
+    make test TARGET=fpga7 TEST=core7
+    make test TARGET=fpga7 TEST=soc7
+    make regression TARGET=fpga7
+
+Other useful commands:
+
+    make lint TARGET=fpga7
+    make test TARGET=fpga7 TEST=dcache
+    make test TARGET=fpga7 TEST=axi_interconnect_1xn
+    make test TARGET=fpga7 TEST=axi_default_error
+    make test TARGET=fpga7 TEST=mem7
+    make test TARGET=fpga7 TEST=cache7
+
+Registered seven-stage test keys in the root Makefile:
+    soc_addr_decode       Address/PMA/transaction legality checks
+    axi_default_error     Default-error responder
+    axi_read_router       Read routing
+    axi_write_router      Write routing
+    axi_interconnect_1xn  Standalone fabric integration
+    dbp_sram              SRAM-backed branch predictor (fpga7/sky130)
+    dbp_asap7             ASAP7-backed branch predictor (asap7)
+    dcache                Data cache
+    fetch                 Fetch path
+    mem7                  Memory pipeline path
+    cache7                Cache subsystem
+    core7                 Core with testbench memory; 38 instruction tests
+    soc7                  Core + caches + AXI memory model; 38 instruction tests
+
+Profile regression membership is explicit, not every registered test:
+    fpga7/sky130:
+      soc_addr_decode axi_read_router axi_write_router axi_interconnect_1xn
+      dbp_sram dcache fetch core7 soc7
+    asap7:
+      same list, with dbp_asap7 instead of dbp_sram
+    legacy5:
+      soc5
+
+Other profiles, still software simulation:
+
+    make regression TARGET=legacy5
+    make regression TARGET=asap7
+    make regression TARGET=sky130
+    make regression-all
+
+Do not use soc7/core7 as legacy5 tests; its registered instruction test is soc5.
+ASAP7 and Sky130 simulation select their storage models, not physical silicon.
+
+PowerShell alternative: prefix a single command with WSL, for example:
+
+    wsl -d Ubuntu-24.04 -- make test TARGET=fpga7 TEST=core7
+    wsl -d Ubuntu-24.04 -- make regression TARGET=fpga7
+
+Result interpretation:
+    The Makefile checks the registered PASS marker, not only simulator exit.
+    soc_addr_decode: "SUMMARY | PASS=35 FAIL=0"
+    core7: "CORE-7STG SUMMARY: 38 PASS | 0 FAIL | 0 TIMEOUT"
+    soc7: "SOC-7STG SUMMARY: 38 PASS | 0 FAIL | 0 TIMEOUT"
+    Simulator executable/logs: build\verilator\<TARGET>\<TEST>\
+    Individual simulation output: run.log in that directory.
+
+During assistant setup, the address-decoder smoke test passed and the 38 memory
+images built successfully. Later, the user reported all TCs passing; that report
+does not identify which profiles were run. No additional tests were run to write
+this guide. Passing the current tests does not establish that the FPGA wrapper,
+new peripherals, interrupts, or a full CPU-to-new-fabric path are validated.
+
+3. ARCHITECTURE: WHAT EXISTS
+===========================
+
+CPU options:
+    Legacy five-stage RV32 core: IF -> ID -> EX -> MEM -> WB.
+    Seven-stage RV32 core: IF1 -> IF2 -> ID -> EX -> MEM1 -> MEM2 -> WB.
+    Integer RV32I execution, forwarding, hazard control, branch prediction,
+    separate instruction/data caches, write buffer, and AXI master interface.
+    Do not assume Linux/privileged-mode, CSR, MMU, or interrupt support.
+
+Cache parameters in rtl\cpu\cache\cache_pkg.sv:
+    32-bit addresses/data; four byte strobes; 16-byte cache lines.
+    I-cache: 4 KiB, direct-mapped.
+    D-cache: 4 KiB, two-way.
+    Write buffer: four entries.
+
+Current canonical seven-stage simulation:
+
+    riscv_core_7stg
+        | instruction / data request-response interfaces
+    cache_subsystem_7stg
+        | I-cache + D-cache + write buffer
+    bus_arbiter
+        | one external AXI master, no ID signals on CPU wrapper
+    testbench AXI memory model
+
+The bus is an AMBA AXI4 subset, NOT a mesh/ring Network-on-Chip (NoC).
+AR/R and AW/W/B are the five channels. Read arbitration gives D-cache priority
+over I-cache; writes use a separate FSM. Current bus_arbiter emits four-beat,
+32-bit WRAP reads and single-beat, 32-bit INCR writes with byte strobes.
+
+There are THREE distinct implementation contexts:
+
+A. Canonical profile tops:
+   legacy5 -> filelists\legacy5.f -> riscv_soc
+   fpga7   -> filelists\fpga7.f   -> riscv_soc_7stg
+   asap7   -> filelists\asap7.f   -> riscv_soc_7stg
+   sky130  -> filelists\sky130.f  -> riscv_soc_7stg
+   These expose CPU/cache AXI, not a populated peripheral subsystem.
+
+B. Existing legacy FPGA wrapper:
+   rtl\fpga\fpga_top.sv instantiates riscv_soc (FIVE-stage), axi_decoder,
+   axi_bram, uart_axi/uart_tx, and a clock-wizard dependency.
+   BRAM: 16,384 32-bit words = 64 KiB with the wrapper's current parameters.
+   UART: transmit-only, default 115200 baud; no RX input and no interrupt.
+   No implemented GPIO, SPI, I2C, timer, PLIC, CLINT, DMA, TinyTransformer,
+   ASCON accelerator, AXI-to-APB bridge, or APB peripheral subsystem was found
+   in the inspected project RTL.
+   fpga_top is not included in the canonical profile filelists and is NOT the
+   top selected by "make synth". It contains author-specific image paths and
+   vendor clock IP, so it is not a ready-to-run portable board build.
+
+C. New modular fabric:
+   rtl\soc\interconnect\axi_interconnect_1xn.sv, axi_read_router.sv,
+   axi_write_router.sv, axi_default_error.sv, soc_addr_decode.sv.
+   Implemented and exercised as standalone unit/integration targets.
+   One upstream AXI master to four downstream target indices; default ID width
+   two bits; one outstanding read and one outstanding write, independently.
+   Unmapped/illegal transactions use an internal DECERR responder.
+   This fabric is NOT instantiated by the current riscv_soc_7stg wrapper.
+   Its routers/error module are supplied through TEST_EXTRA entries for tests,
+   rather than being integrated into the canonical CPU profile filelists.
+
+4. ADDRESS MAP: DO NOT CONFUSE THE TWO MAPS
+=========================================
+
+4.1 Central descriptor/PMA map
+
+Source of truth: rtl\soc\interconnect\soc_addr_map_pkg.sv.
+Used by the standalone fabric decoders and seven-stage D-cache classification.
+Matching rule: (address & mask) == base.
+An entry reserves/classifies a window; it does not instantiate the named IP.
+
+Inclusive range                 Size     Target       Attributes
+------------------------------  -------  -----------  ------------------------
+0x00000000 - 0x000FFFFF          1 MiB    0 MEM        R/W/X, cacheable, bursts
+0x10000000 - 0x100000FF          256 B    1 TINY       R/W, device, no X/cache
+0x20000000 - 0x200000FF          256 B    2 ASCON      R/W, device, no X/cache
+0x30000000 - 0x3000FFFF          64 KiB   3 APB        R/W, device, no X/cache
+
+The three device windows disallow multi-beat transactions.
+Unmatched addresses are errors in the new fabric, not automatically usable RAM.
+The 1 MiB memory window is a decode allocation, not proof of 1 MiB physical RAM.
+For example, the soc7 testbench provides only 64 KiB of backing memory.
+
+4.2 Legacy FPGA map
+
+Source: rtl\fpga\axi_decoder.sv and rtl\fpga\uart_axi.sv.
+
+    addr[31:28] == 0x1 -> UART: 0x10000000 - 0x1FFFFFFF.
+    ALL other addresses -> BRAM, not just the intended low RAM range.
+
+BRAM uses low word-index bits, so addresses outside physical RAM can alias.
+There is no safe "unused address returns DECERR" contract in this decoder.
+The UART ignores register address offsets:
+    Read  at 0x10000000: bit 0 = transmitter busy; other bits zero.
+    Write at 0x10000000: low eight data bits become the transmitted byte.
+    Other addresses in its selected window alias the same behavior.
+    Use aligned 32-bit accesses as in sw\hello_uart.c.
+
+CRITICAL CONFLICT: 0x10000000 means UART in the old FPGA wrapper but is reserved
+for TinyTransformer in the central map. There is no APB UART sub-address
+assignment yet. Do not mix the maps without explicitly migrating the wrapper,
+firmware constants, and tests.
+
+4.3 Candidate address space for a new IP (NOT assigned)
+
+Outside the four central windows, space is currently unmapped. For a NEW direct
+AXI target, a possible future allocation is:
+    Base 0x40000000; end 0x40000FFF; size 4 KiB; mask 0xFFFFF000.
+This is a proposal only. It will return DECERR through the new fabric until a
+descriptor and working downstream IP are integrated. In the old decoder it
+would alias BRAM, so it is not currently a safe plug-in address.
+
+For small APB peripherals, the reserved 64 KiB APB window could be subdivided,
+for example:
+    0x30000000 - 0x30000FFF: possible future UART slot.
+    0x30001000 - 0x30001FFF: possible future timer slot.
+    0x30002000 - 0x30002FFF: possible future custom IP slot.
+These are examples, not current assignments. First implement an AXI-to-APB
+bridge and APB decoder. Do not overlap subwindows or claim they already work.
+Keep TINY/ASCON reservations unless consciously changing their design contract.
+
+5. ADDING A NEW PERIPHERAL
+=========================
+
+Recommended approach: integrate the modular AXI fabric into a platform wrapper
+and use that as the peripheral boundary, rather than extending the legacy
+catch-all BRAM decoder. This is future RTL work, not done by this guide.
+
+Step 1 - Define the contract.
+    Choose a non-overlapping, power-of-two-sized, naturally aligned window.
+    Specify register offsets, reset values, R/W permissions, byte enables,
+    side effects, error responses, clock/reset, and polling/IRQ behavior.
+    Register-only IP normally needs readable/writable as appropriate,
+    executable=0, cacheable=0, device=1, allow_burst=0.
+
+Step 2 - Choose the interface.
+    Direct AXI slave: implement this repository's AXI subset or an adapter to
+    AXI4-Lite; echo accepted IDs through RID/BID at the new fabric boundary.
+    APB slave: first provide the missing bridge and local APB decode, then attach
+    below TARGET_APB. Adding a child there need not add a new top-level target.
+    A DMA/bus-master IP needs multi-master arbitration and memory-coherency/
+    software ownership design; the 1-to-N router alone is not sufficient.
+
+Step 3 - Resolve existing CPU/fabric integration gaps.
+    CPU AXI has no IDs; new fabric expects IDs. Either extend the CPU interface
+    end-to-end or use a defined adapter that supplies IDs and handles responses.
+    Do not assume the specification's I-cache/D-cache/write-buffer ID allocation
+    is already wired in bus_arbiter.
+
+    CPU reads currently always use four-beat WRAP, including device reads.
+    Device descriptors reject multi-beat requests. Add a correct single-beat
+    device-read path and cache response handling before using MMIO through the
+    new fabric. Merely marking an address uncacheable does NOT fix this.
+    Do not simply enable bursts on side-effecting registers as a workaround.
+
+    Define how AXI errors become software-visible; do not assume DECERR already
+    produces a precise CPU access-fault trap. Confirm instruction-fetch
+    permissions and ordering/completion of buffered device writes as well.
+
+Step 4 - Update map and topology.
+    Edit rtl\soc\interconnect\soc_addr_map_pkg.sv.
+    A fifth direct target requires SOC_NUM_SLAVES=5, sufficient target encoding
+    (SOC_TARGET_WIDTH at least 3), a new enum value, an updated region count,
+    and the descriptor. Update all affected consumers/tests for encoding changes.
+    Connect all five downstream AXI channels at the new target's array index.
+    Existing four targets must remain connected or have explicit error slaves;
+    do not leave their response inputs floating.
+    Update docs\spec\axi_interconnect.md and software base-address definitions.
+
+Step 5 - Wire build and verification.
+    Add project RTL to only the applicable filelists, preserving package/backend
+    dependency order. Keep the public cache/predictor selectors platform-neutral.
+    Use the project's Apache-2.0 header for new owned RTL/testbench/script files.
+    Register maintained tests in the root Makefile with TEST_TOP, TEST_FILE,
+    TEST_PASS, and TEST_EXTRA where dependencies are outside the profile list.
+    Add regression membership explicitly; registration alone does not include
+    the test in a regression.
+    Test reset, reads/writes, byte strobes, backpressure, independent AXI AW/W,
+    response IDs, address boundaries, unmapped access, errors, and side effects.
+    Add CPU-to-peripheral integration coverage; standalone router tests alone
+    cannot validate MMIO through the caches and write buffer.
+
+Step 6 - Validate the affected profiles when doing that RTL change.
+    Run make lint and relevant targeted tests for each affected profile.
+    Shared seven-stage changes: regress fpga7, asap7, and sky130.
+    Shared package, selector, Makefile, or cross-profile filelist changes:
+    run make regression-all. See AGENTS.md for the full validation contract.
+    FPGA/Sky130 flow changes additionally require their canonical flow commands;
+    simulation success does not imply synthesis, timing closure, or signoff.
+
+6. INTERRUPTS FOR A NEW IP
+=========================
+
+Current answer: NO implemented CPU interrupt line or IRQ number is available.
+
+The core and SoC wrappers have no interrupt input. There is no implemented
+machine-mode CSR/trap/return path, PLIC, or CLINT in the inspected project RTL.
+UART has no IRQ output. AXI IDs and AXI target indices are NOT interrupt IDs.
+Do not assign "IRQ 1" or a RISC-V machine interrupt cause and assume it works.
+
+Practical first integration:
+    Provide STATUS/BUSY/DONE/ERROR registers and poll them from firmware.
+    Define timeout handling and explicit sticky-bit clear/ack semantics.
+    A peripheral IRQ output can be reserved for future use, but cannot currently
+    invoke a CPU interrupt service routine.
+
+To support real interrupts later, design and implement together:
+    - Peripheral pending/enable/ack logic and safe clock-domain crossing.
+    - Interrupt routing/controller and documented source-number allocation.
+    - CPU interrupt input, priority, precise pipeline trap entry/flush behavior.
+    - Machine CSRs such as mstatus, mie, mip, mtvec, mepc, mcause, and mret.
+    - Software vector/handler, context save/restore, and controller acknowledge.
+    - Tests for masks, pending events, multiple sources, entry/return, and reset.
+
+A future PLIC-like controller may reserve source 0 and allocate nonzero source
+IDs, but no such numbering is assigned by this repository today. A peripheral
+source ID is distinct from the CPU's machine-external interrupt cause.
+
+7. GIT CHECK-IN AND GENERATED FILES
+==================================
+
+origin points to your fork; upstream is the author's repository with its local
+push URL disabled. Normal pushes select origin. Local remote safety settings
+are not carried into a fresh clone; see CONTRIBUTING.md.
+No commit or push is performed merely by generating this guide.
+
+PowerShell example:
+
+    git switch -c docs/how-to
+    git add -- How_to.txt
+    git diff --cached
+    git commit -m "Document setup, tests, and peripheral integration"
+    git push -u origin docs/how-to
+
+Git tracks files, not empty folders. Add real content or a .gitkeep placeholder
+when an empty folder must be retained. New work/project_* source folders are
+allowed; generated build outputs should not be added.
+
+IMPORTANT: this checkout currently has tracked test-image artifacts under
+tb\riscv_test\build\. Rebuilding can show modified .elf/.mem files even though
+build/ is ignored: ignore rules do not untrack already committed files.
+Review "git status --short" and stage only intended source/document changes.
+Do not use "git add ." blindly. Removing tracked artifacts is a separate,
+intentional repository cleanup; this guide does not remove or revert them.
+
+8. PRIMARY REFERENCE FILES
+=========================
+
+    Makefile
+    AGENTS.md
+    CONTRIBUTING.md
+    filelists\legacy5.f
+    filelists\fpga7.f
+    filelists\asap7.f
+    filelists\sky130.f
+    tb\riscv_test\Makefile
+    rtl\cpu\riscv_soc_7stg.sv
+    rtl\cpu\core\riscv_core_7stg.sv
+    rtl\cpu\core\cu.sv
+    rtl\cpu\cache\cache_pkg.sv
+    rtl\cpu\cache\bus_arbiter.sv
+    rtl\soc\interconnect\soc_addr_map_pkg.sv
+    rtl\soc\interconnect\soc_addr_decode.sv
+    rtl\soc\interconnect\axi_interconnect_1xn.sv
+    rtl\fpga\fpga_top.sv
+    rtl\fpga\axi_decoder.sv
+    rtl\fpga\axi_bram.sv
+    rtl\fpga\uart_axi.sv
+    rtl\fpga\uart_tx.sv
+    sw\hello_uart.c
+    flow\vivado\tcl\synth_filelist.tcl
+    docs\spec\axi_interconnect.md
+
+The interconnect specification still labels itself pre-implementation and uses
+the name cpu_bus_arbiter, although modular interconnect RTL now exists and the
+actual CPU arbiter is bus_arbiter. Treat that document as intended design:
+its ID/MMIO contracts and APB examples are not all integrated CPU behavior.
+Use RTL plus executable filelists/Makefiles to confirm implementation status.
